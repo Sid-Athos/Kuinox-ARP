@@ -10,7 +10,7 @@ namespace Kuinox.ARP.Tests
 	{
 
 		[Test]
-		public void running_arp_does_not_throw_if_english_language()
+		public void running_arp_does_not_throw_if_english_language_throws_otherwise()
 		{
 
             Func<ICollection<ArpInterface>> action = ARP.GetInterfaces;
