@@ -1,144 +1,105 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Globalization;
-using System.IO;
-using System.Net;
-using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
+using System.ComponentModel;
 
-namespace Kuinox.ARP
+namespace ConsoleApplication5
 {
-    public static class ARP
+    class Program
     {
-        /// <summary>
-        /// Parse the ARP output of 'arp -a' on windows.
-        /// </summary>
-        /// <param name="reader">The <see cref="StreamReader"/> containing the Standard Output of 'arp -a'.</param>
-        /// <returns>An object representing the ARP interfaces.</returns>
-        public static ICollection<ArpInterface> GetInterfaces()
+        // The max number of physical addresses.
+        const int MAXLEN_PHYSADDR = 8;
+
+        // Define the MIB_IPNETROW structure.
+        [StructLayout(LayoutKind.Sequential)]
+        struct MIB_IPNETROW
         {
-            if (Environment.OSVersion.Platform != PlatformID.Win32NT) throw new NotImplementedException("TODO.");
+            [MarshalAs(UnmanagedType.U4)]
+            public int dwIndex;
+            [MarshalAs(UnmanagedType.U4)]
+            public int dwPhysAddrLen;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst =
+            MAXLEN_PHYSADDR)]
+            byte[] bPhysAddr;
+            [MarshalAs(UnmanagedType.U4)]
+            public int dwAddr;
+            [MarshalAs(UnmanagedType.U4)]
+            public int dwType;
+        }
 
-            if (!CultureInfo.InstalledUICulture.EnglishName.StartsWith("English")) throw new FormatException("ARP library only supports english language so far.");
+        // Declare the GetIpNetTable function.
+        [DllImport("IpHlpApi.dll")]
+        [return: MarshalAs(UnmanagedType.U4)]
+        static extern int GetIpNetTable(
+        IntPtr pIpNetTable,
+        [MarshalAs(UnmanagedType.U4)]
+ref int pdwSize,
+        bool bOrder);
 
-            using (Process process = Process.Start(new ProcessStartInfo("arp", "-a")
+        // The insufficient buffer error.
+        const int ERROR_INSUFFICIENT_BUFFER = 122;
+
+        static void Main(string[] args)
+        {
+            // The number of bytes needed.
+            int bytesNeeded = 0;
+
+            // The result from the API call.
+            int result = GetIpNetTable(IntPtr.Zero, ref bytesNeeded,
+            false);
+
+            // Call the function, expecting an insufficient buffer.
+            if (result != ERROR_INSUFFICIENT_BUFFER)
             {
-                RedirectStandardOutput = true
-            }))
+                // Throw an exception.
+                throw new Win32Exception(result);
+            }
+
+            // Allocate the memory, do it in a try/finally block, to ensure
+            // that it is released.
+            IntPtr buffer = IntPtr.Zero;
+
+            // Try/finally.
+            try
             {
-                process.WaitForExit();
-                using (var reader = process.StandardOutput)
+                // Allocate the memory.
+                buffer = Marshal.AllocCoTaskMem(bytesNeeded);
+
+                // Make the call again. If it did not succeed, then
+                // raise an error.
+                result = GetIpNetTable(buffer, ref bytesNeeded, false);
+
+                // If the result is not 0 (no error), then throw an
+                if (result != 0)
                 {
-                    return WinParseArp(reader);
+                    // Throw an exception.
+                    throw new Win32Exception(result);
+                }
+
+                // Now we have the buffer, we have to marshal it. We can
+                // the first 4 bytes to get the length of the buffer.
+                int entries = Marshal.ReadInt32(buffer);
+
+                // Increment the memory pointer by the size of the int.
+                IntPtr currentBuffer = new IntPtr(buffer.ToInt64() +
+                sizeof(int));
+
+                // Allocate an array of entries.
+                MIB_IPNETROW[] table = new MIB_IPNETROW[entries];
+
+                // Cycle through the entries.
+                for (int index = 0; index < entries; index++)
+                {
+                    // Call PtrToStructure, getting the structure information 
+                    table[index] = (MIB_IPNETROW)
+                    Marshal.PtrToStructure(new IntPtr(currentBuffer.ToInt64() + (index *
+                    Marshal.SizeOf(typeof(MIB_IPNETROW)))), typeof(MIB_IPNETROW));
                 }
             }
-        }
-
-
-        static ICollection<ArpInterface> WinParseArp(StreamReader reader)
-        {
-            reader.ReadLine();//useless line.
-            List<ArpInterface> entries = new List<ArpInterface>();
-            while (!reader.EndOfStream)
+            finally
             {
-                entries.Add(WinReadArpEntry(reader));
+                // Release the memory.
+                Marshal.FreeCoTaskMem(buffer);
             }
-            return entries;
         }
-
-
-        static ArpInterface WinReadArpEntry(StreamReader reader)
-        {
-            string headerLine = reader.ReadLine();
-            string[] headerEntries = headerLine.Split(' ');
-            IPAddress address = IPAddress.Parse(headerEntries[1]);
-            string maskHexNumber = headerEntries[3].Split('x')[1];
-            byte mask = byte.Parse(maskHexNumber, NumberStyles.HexNumber);
-            reader.ReadLine();//useless line.
-            var entries = new List<InterfaceArpEntry>();
-            while (true)
-            {
-                string line = reader.ReadLine();
-                if (line == null) break;//We rechead EndOfStream.
-
-                string[] lineEntries = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (lineEntries.Length == 0) break;//Arp Interfaces are separated by a blank line.
-
-                IPAddress ipAddress = IPAddress.Parse(lineEntries[0]);
-                string physicalAddress = lineEntries[1].ToUpperInvariant();//PhysicalAddress.Parse only accept upper case addresses.
-                bool isDynamic;
-                if (lineEntries[2] == "dynamic")
-                {
-                    isDynamic = true;
-                }
-                else if (lineEntries[2] == "static")
-                {
-                    isDynamic = false;
-                }
-                else
-                {
-                    throw new InvalidDataException("IP is neither dynamic or static.");
-                }
-                InterfaceArpEntry entry = new InterfaceArpEntry(ipAddress, PhysicalAddress.Parse(physicalAddress), isDynamic);
-                entries.Add(entry);
-            }
-            return new ArpInterface(address, mask, entries);
-        }
-    }
-
-    /// <summary>
-    /// Represent and arp entry of an interface in the ARP table.
-    /// </summary>
-    public class InterfaceArpEntry
-    {
-        internal InterfaceArpEntry(IPAddress ipAddress, PhysicalAddress physicalAddress, bool isDynamic)
-        {
-            IPAddress = ipAddress;
-            PhysicalAddress = physicalAddress;
-            IsDynamic = isDynamic;
-        }
-
-        /// <summary>
-        /// IP Address of the entry.
-        /// </summary>
-        public IPAddress IPAddress { get; }
-
-        /// <summary>
-        /// MAC Address of the entry.
-        /// </summary>
-        public PhysicalAddress PhysicalAddress { get; }
-
-        /// <summary>
-        /// True if IP is dynamic, else IP is static.
-        /// </summary>
-        public bool IsDynamic { get; }
-    }
-
-    /// <summary>
-    /// Represent an interface in the ARP table.
-    /// </summary>
-    public class ArpInterface
-    {
-        internal ArpInterface(IPAddress interfaceIPAddress, byte mask, ICollection<InterfaceArpEntry> arpEntries)
-        {
-            InterfaceIPAddress = interfaceIPAddress;
-            Mask = mask;
-            ArpEntries = arpEntries;
-        }
-
-        /// <summary>
-        /// IP Address of the Interface.
-        /// </summary>
-        public IPAddress InterfaceIPAddress { get; }
-
-        /// <summary>
-        /// Mask of the Interface.
-        /// </summary>
-        public byte Mask { get; }
-
-        /// <summary>
-        /// Arp Entries of this interface.
-        /// </summary>
-        public ICollection<InterfaceArpEntry> ArpEntries { get; }
     }
 }
