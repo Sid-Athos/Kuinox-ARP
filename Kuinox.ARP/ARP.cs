@@ -18,7 +18,10 @@ namespace Kuinox.ARP
         public static ICollection<ArpInterface> GetInterfaces()
         {
             if( Environment.OSVersion.Platform != PlatformID.Win32NT ) throw new NotImplementedException( "TODO." );
-            using( Process process = Process.Start( new ProcessStartInfo( "arp", "-a" )
+      
+            if ( !CultureInfo.InstalledUICulture.EnglishName.StartsWith( "English" ) ) throw new FormatException( "ARP library only supports english language so far." );
+
+            using ( Process process = Process.Start( new ProcessStartInfo( "arp" , "-a" )
             {
                 RedirectStandardOutput = true
             } ) )
